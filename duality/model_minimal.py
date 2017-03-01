@@ -462,5 +462,5 @@ if(__name__=='__main__'):
             average_loss+=loss*LEARN_STEP/LOG_STEP;
         if(np.mod(i+1, LOG_STEP)==0):
             print(average_loss);
-            print("HIT RATE: %f %" % (hit_time/i)*100);
+            print("HIT RATE: %f" % ((hit_time/i)*100));
             average_loss=0.0;

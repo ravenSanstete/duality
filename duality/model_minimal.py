@@ -14,8 +14,19 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import spacy
 import numpy as np
 import Levenshtein as leven
+import torch
+from torch.autograd import Variable
+import torch.nn.functional as F
+from .context import voice_name_dict, song_name_dict, WORD_VEC_SIZE, NOISE_LEVEL, Transition, SING_DANCE_NO, DEFAULT_OPTION_NO;
+from .cortex import Cortex, Dejavu;
 
-from .context import voice_name_dict, song_name_dict;
+
+
+
+def wrap(np_arr):
+    return torch.FloatTensor(np_arr);
+
+
 
 """
 We can consider a document as (S_i), and we assume we are able to evaluate the
@@ -202,19 +213,49 @@ def select_voice(sentiment_param, is_command):
         ind=4;
     return ind;
 
-
-def select_action(command):
-    return 1;
+# first merge the vectors of the command and the obj, if there is no obj, just merge with a zero-vector
 
 
 
-# for miku core usage
-def analyze_command(sent, command):
-    threshold=0.9;
-    if(leven.jaro(command.text, 'sing')>=threshold or leven.jaro(command.text, 'dance')>=threshold):
-        return 200, _recognize_song_name(sent, command);
-    else:
-        return select_action(command), -1;
+# return a refined 900*1 vector
+def extract_env_vec(command):
+    # take both the adv and the obj as the input vectors candidate
+    if(command==None):
+        return NOISE_LEVEL*np.random.randn(1,3*WORD_VEC_SIZE);
+    # only take the first command(and it can be assumed)
+    verb_vec=command.vector.reshape((1,WORD_VEC_SIZE));
+    obj_vec= NOISE_LEVEL*np.random.randn(1,WORD_VEC_SIZE);
+    adv_vec= NOISE_LEVEL*np.random.randn(1,WORD_VEC_SIZE);
+
+    # obj='NULL';
+    # adv='NULL';
+
+    for c in command.children:
+        # if the word
+        if(c.dep_=='advmod'):
+            adv_vec=c.vector.reshape((1,WORD_VEC_SIZE));
+            # adv=c.text;
+        if(c.dep_=='dobj'):
+            obj_vec=c.vector.reshape((1,WORD_VEC_SIZE));
+            # obj=c.text;
+        # if there exists a prep, just find the pobj
+        if(c.dep_=='prep'):
+            for k in c.children:
+                if(k.dep_=='pobj'):
+                    obj_vec=k.vector.reshape((1,WORD_VEC_SIZE));
+                    # obj=k.text;
+                    break;
+    return np.concatenate((verb_vec,obj_vec,adv_vec), axis=1);
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -230,20 +271,15 @@ class MemorySeq:
         self.q.append(item);
 
     def get(self):
-        return self.get(0);
-
-    def get(self, i):
-        if(i>=len(self.q)):
-            return 999;
+        if(len(self.q)==0):
+            return None;
         else:
-            return self.q[i];
+            result=self.q[0];
+            self.q=self.q[1:]; # reshape
+            return result;
 
-    def size(self):
+    def __len__(self):
         return len(self.q);
-
-
-
-
 
 
 
@@ -251,37 +287,120 @@ class MemorySeq:
 
 # the interface
 class MikuCore:
-    def __init__(self):
+    def __init__(self, capacity=1000):
         self.analyzer= SentimentIntensityAnalyzer();
         print('記憶体ロード、待ってくださいね');
         self.nlp= spacy.load('en');
         print('完成です');
-        self.memory_size=20;
-        self.memory_pool={
-            'actions':MemorySeq(self.memory_size),
-            'rewards':[],
-            'options':MemorySeq(self.memory_size),
-            'voices':MemorySeq(self.memory_size)
-        }; # for storing the histo of interactions;
+        self.batch_size=50;
+        self.reg_1=0.01;
+        self.gamma=0.01;
+        self.max_memory_size=20;
+        self.dejavu=Dejavu(capacity);
+        self.cortex=Cortex();
+        self.optimizer=torch.optim.RMSprop(self.cortex.parameters());
+        self.probed_env=wrap(NOISE_LEVEL*np.random.randn(1,3*WORD_VEC_SIZE));
+        self.action_selected=torch.LongTensor([0]);
 
+        self.memory_pool={
+            "action_ids": MemorySeq(self.max_memory_size),
+            "voice_ids":MemorySeq(self.max_memory_size),
+            "options":MemorySeq(self.max_memory_size)
+        }
+    # when a command reaches in, and thus the current state has been changed to the
+
+    # CURRENT_STATE(COMMAND REACHED) -> [ACTION] -> NEXT_STATE(COMMAND UPDATED) -> REWARD
+    # each time a COMMENT COMES, PUSH IT INTO THE MEMORY
     def process(self, comment):
         sentiment_value, commands = doc_eval(comment, self.nlp, self.analyzer);
-        self.memory_pool['rewards'].append(sentiment_value);
-        print(commands);
-        for command in commands:
-            action_id, option = analyze_command(self.nlp(comment), command);
-            self.memory_pool['actions'].put(action_id); # these two are one-to-one res.
-            self.memory_pool['options'].put(option);
-        self.memory_pool['voices'].put(select_voice(sentiment_value, len(commands)>0));
+
+        # ignore the potential second command
+        command = commands[0] if(len(commands)>=1) else None;
+
+        # select the voice
+        voice_id= select_voice(sentiment_value, command!=None);
+
+        # first check whether the comment means to sing or dance
+        if(command!=None):
+            potential_dance_no = self.recognize_long_bev(comment, command);
+            if(potential_dance_no!=None):
+                # enqueue result.
+                action_id= SING_DANCE_NO;
+                option= potential_dance_no;
+                self.put_memory(action_id, voice_id, option);
+                return;
+
+        # else, some actions that needed to learn or some comments work as indicator of satisfaction
+        former_state=self.probed_env;
+        action=self.action_selected;
+        # here is only a simulation
+        # update both the env and the action adopted
+        self.probed_env= wrap(extract_env_vec(command));
+        self.action_selected=self.cortex.choice(self.probed_env); # next action it wants to do
+        # with no option, thus -1;
+        reward = torch.FloatTensor([sentiment_value]); # inferred from the current comment
+        self.dejavu.push(former_state, action, self.probed_env, reward);
+
+        # finally, push response to the queues
+        self.put_memory(self.action_selected[0], voice_id, DEFAULT_OPTION_NO);
+        return self.action_selected[0];
 
     # this modifies its own parameters to improve the entertaining skills
-    def improve(self):
+    def step(self):
+        if(len(self.dejavu)<self.batch_size):
+            return 5.0; # which means the dejavu is not enough for miku to modify the weight
+        # fo the sample
+        transitions= self.dejavu.sample(self.batch_size);
+
+        batch = Transition(*zip(*transitions));
+
+        non_final_mask = torch.ByteTensor(tuple(map(lambda s: s is not None, batch.next_state)));
+        non_final_next_states_t = torch.cat(tuple(s for s in batch.next_state if s is not None)).type(torch.FloatTensor);
+        non_final_next_states = Variable(non_final_next_states_t, volatile=True);
+
+        # unpack the data
+        state_batch = Variable(torch.cat(batch.state));
+        action_batch = Variable(torch.cat(batch.action));
+        reward_batch = Variable(torch.cat(batch.reward));
+
+        # forward to compute the Q value
+        state_action_values = self.cortex(state_batch).gather(1,action_batch.view(-1,1));
+
+        # compute the next state value
+        next_state_values = Variable(torch.zeros(self.batch_size))
+        next_state_values[non_final_mask] = self.cortex(non_final_next_states).max(1)[0];
+
+        next_state_values.volatile = False;
+
+        expected_state_action_values = (next_state_values * self.gamma) + reward_batch;
+        # compute the loss
+        loss = F.smooth_l1_loss(state_action_values, expected_state_action_values); # self.reg_1* self.cortex.auto_encoder_loss(state_batch);
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        for param in self.cortex.parameters():
+            param.grad.data.clamp_(-1, 1) # a truncate of the data
+        self.optimizer.step()
+        return torch.mean(loss).data;
+
+    # this wraps the logic: first recognize whether the command is a sing/dance command if so
+    def recognize_long_bev(self, sent, command):
+        threshold=0.9;
+        if(leven.jaro(command.text, 'sing')>=threshold or leven.jaro(command.text, 'dance')>=threshold):
+            return  _recognize_song_name(sent, command);
+        else:
+            return None;
+
+    # find the action that occurs most frequently from the candidate
+    def respond(self):
         pass;
 
-    def respond(self):
-        print ("\t %s\t %s\t%s\t%s" % ("Action", "Voice" ,"Reward", "Option"));
-        for i in range(self.memory_pool['actions'].size()):
-            print('\t%d\t%d\t%f\t%d' % (self.memory_pool['actions'].get(i), self.memory_pool['voices'].get(i), self.memory_pool['rewards'][i] if(i<len(self.memory_pool['rewards'])) else 999.0, self.memory_pool['options'].get(i)))
+    def put_memory(self, action_id, voice_id, option):
+        self.memory_pool['action_ids'].put(action_id);
+        self.memory_pool['voice_ids'].put(voice_id);
+        self.memory_pool['options'].put(option);
+
+
 
 
 
@@ -304,8 +423,13 @@ docs=[
 'to dance to happy birthday',
 'to dance to happy birthday for me',
 'to dance to the song happy birthday for me',
-'to dance to the song named happy birthday'
+'to dance to the song named happy birthday',
+'walk forward',
+'take the apple sincerely',
+'close your eyes'
 ]
+
+
 
 
 if(__name__=='__main__'):
@@ -315,6 +439,28 @@ if(__name__=='__main__'):
     miku= MikuCore();
 
 
-    for i, doc in enumerate(docs):
-        miku.process(doc);
-    miku.respond();
+    # for i, doc in enumerate(docs):
+    #     miku.process(doc);
+    # miku.respond();
+    MAX_STEP=1000000;
+    LOG_STEP=1000;
+    LEARN_STEP=10;
+    initial_statement="wave your hands";
+    good_statement="fantastic";
+    bad_statement="stupid";
+    average_loss=0.0;
+    hit_time=0;
+    for i in range(MAX_STEP):
+        action_no=miku.process(initial_statement);
+        if(int(action_no)==1):
+            miku.process(good_statement);
+            hit_time+=1;
+        else:
+            miku.process(bad_statement);
+        if(np.mod(i+1, LEARN_STEP)==0):
+            loss=miku.step();
+            average_loss+=loss*LEARN_STEP/LOG_STEP;
+        if(np.mod(i+1, LOG_STEP)==0):
+            print(average_loss);
+            print("HIT RATE: %f %" % (hit_time/i)*100);
+            average_loss=0.0;

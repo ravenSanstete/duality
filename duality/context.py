@@ -1,5 +1,6 @@
 from collections import namedtuple
 DIR='/Users/morino/Downloads/sentiment_anaysis/tweet140/data';
+MEMORY_DIR='/Users/morino/Desktop/common/OneDrive/code/duality/duality/data/memory.dat';
 PORT=13000;
 
 # use this dictionary to select the local name of the action
@@ -47,12 +48,12 @@ voice_name_dict= {
 
 
 song_name_dict={
-    12: "Elysion",
-    13: "my time",
-    14: "love2-4-11",
-    15: "WinterAlice",
-    16: "relations",
-    17: "Bad Apple"
+    1: "Elysion",
+    2: "my time",
+    3: "love2-4-11",
+    4: "WinterAlice",
+    5: "relations",
+    6: "Bad Apple"
 }
 
 
@@ -71,4 +72,4 @@ Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'
 # define 200 as sing dance
 SING_DANCE_NO=63;
 
-DEFAULT_OPTION_NO=-1;
+DEFAULT_OPTION_NO=0;

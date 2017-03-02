@@ -13,11 +13,13 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 import spacy
 import numpy as np
+import os
 import Levenshtein as leven
+import random
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
-from .context import voice_name_dict, song_name_dict, WORD_VEC_SIZE, NOISE_LEVEL, Transition, SING_DANCE_NO, DEFAULT_OPTION_NO;
+from .context import voice_name_dict, song_name_dict, WORD_VEC_SIZE, NOISE_LEVEL, Transition, SING_DANCE_NO, DEFAULT_OPTION_NO, MEMORY_DIR;
 from .cortex import Cortex, Dejavu;
 
 
@@ -117,20 +119,22 @@ def imperative_classify(sent, nlp):
 # auxiliary method for song selection
 def _find_song(name):
     max_similarity=-0.1;
-    ind=-1;
-    threshold=0.5;
-    print("match with name %s" % (name));
+    ind=0;
+    threshold=0.8;
+    # print("match with name %s" % (name));
     for i in song_name_dict.keys():
         sim=leven.jaro(song_name_dict[i], name)
-        print("similarity %f" % (sim));
+        # print("similarity %f" % (sim));
         if(sim>=max_similarity):
             ind=i;
             max_similarity=sim;
 
     return ind if(max_similarity>=threshold) else None;
 
+
+# which means never exists a song that is not in the dictionary
 def _random_song():
-    return -1;
+    return random.choice(song_name_dict.keys());
 
 
 
@@ -179,11 +183,15 @@ def _recognize_song_name(sent, command):
                     # second trial, find the pp-clause
                     for k in c.children:
                         if(k.dep_=='acl' and k.i+1<len(sent)):
-                            print(k.text);
+                            # print(k.text);
                             potential=_find_song(sent[k.i+1:].text);
+                            if(potential!=None):
+                                return potential;
                             break;
-                    # the final chance,
-                    potential=_find_song(sent[beg_pos:].text);
+                else:
+                    return potential;
+        # final chance
+        potential=_find_song(sent[beg_pos:].text)
         return potential if(potential!=None) else _random_song();
     # can't find a proper song
     return _random_song();
@@ -211,7 +219,7 @@ def select_voice(sentiment_param, is_command):
     if(is_command and np.random.rand(1)[0]<=0.5):
         # then do a random choice from the permission and the current sentiment voice
         ind=4;
-    return ind;
+    return ind if(np.random.rand(1)[0]>=0.8) else 0; # sometimes a voice may not happen
 
 # first merge the vectors of the command and the obj, if there is no obj, just merge with a zero-vector
 
@@ -261,25 +269,24 @@ def extract_env_vec(command):
 
 # which is a soft waterlevel queue
 class MemorySeq:
-    def __init__(self, max_size):
-        self.q=list();
-        self.max_size=max_size;
+    def __init__(self, default_value, mukuchi_rate=0.0):
+        self.q=queue.Queue();
+        self.default_value=default_value;
+        self.mukuchi_rate=mukuchi_rate;
 
     def put(self, item):
-        if(len(self.q)+1>self.max_size):
-            self.get();
-        self.q.append(item);
+        self.q.put(item);
 
     def get(self):
-        if(len(self.q)==0):
-            return None;
+        if(self.q.qsize()==0):
+            return self.default_value;
         else:
-            result=self.q[0];
-            self.q=self.q[1:]; # reshape
-            return result;
+            response=self.q.get() if(np.random.rand(1)[0]>=self.mukuchi_rate) else self.default_value;
+            return response;
+
 
     def __len__(self):
-        return len(self.q);
+        return self.q.qsize();
 
 
 
@@ -287,26 +294,28 @@ class MemorySeq:
 
 # the interface
 class MikuCore:
-    def __init__(self, capacity=1000):
+    def __init__(self, data_path ,capacity=1000):
         self.analyzer= SentimentIntensityAnalyzer();
         print('記憶体ロード、待ってくださいね');
         self.nlp= spacy.load('en');
         print('完成です');
+
+        self.data_path=data_path;
+
+
         self.batch_size=50;
         self.reg_1=0.01;
         self.gamma=0.01;
-        self.max_memory_size=20;
+
+
         self.dejavu=Dejavu(capacity);
-        self.cortex=Cortex();
+        # whether to load or just use a brand new model
+        self.cortex=self.load_state(self.data_path);
         self.optimizer=torch.optim.RMSprop(self.cortex.parameters());
         self.probed_env=wrap(NOISE_LEVEL*np.random.randn(1,3*WORD_VEC_SIZE));
         self.action_selected=torch.LongTensor([0]);
 
-        self.memory_pool={
-            "action_ids": MemorySeq(self.max_memory_size),
-            "voice_ids":MemorySeq(self.max_memory_size),
-            "options":MemorySeq(self.max_memory_size)
-        }
+        self.memory_pool=MemorySeq(default_value=self.organize_response(0, 0, 0));
     # when a command reaches in, and thus the current state has been changed to the
 
     # CURRENT_STATE(COMMAND REACHED) -> [ACTION] -> NEXT_STATE(COMMAND UPDATED) -> REWARD
@@ -322,13 +331,13 @@ class MikuCore:
 
         # first check whether the comment means to sing or dance
         if(command!=None):
-            potential_dance_no = self.recognize_long_bev(comment, command);
+            potential_dance_no = self.recognize_long_bev(self.nlp(comment), command);
             if(potential_dance_no!=None):
                 # enqueue result.
                 action_id= SING_DANCE_NO;
                 option= potential_dance_no;
                 self.put_memory(action_id, voice_id, option);
-                return;
+                return action_id;
 
         # else, some actions that needed to learn or some comments work as indicator of satisfaction
         former_state=self.probed_env;
@@ -393,12 +402,37 @@ class MikuCore:
 
     # find the action that occurs most frequently from the candidate
     def respond(self):
-        pass;
+        return self.memory_pool.get();
 
     def put_memory(self, action_id, voice_id, option):
-        self.memory_pool['action_ids'].put(action_id);
-        self.memory_pool['voice_ids'].put(voice_id);
-        self.memory_pool['options'].put(option);
+        self.memory_pool.put(self.organize_response(action_id, voice_id, option));
+
+
+    def organize_response(self, action_id, voice_id, option):
+        return {
+            "action_id": action_id,
+            "voice_id": voice_id,
+            "option": option
+        };
+
+    # for state maintaining, to make sure the file at data path exists
+    def save_state(self):
+        torch.save(self.cortex, self.data_path);
+
+    def load_state(self, whether_load=True):
+    # first check whether such a file exists or the user wants to do it again
+        if(whether_load):
+            try:
+                model= torch.load(self.data_path);
+            except Exception as e:
+                print("No such data file");
+            finally:
+                model = Cortex();
+            return model;
+        else:
+            return Cortex();
+
+
 
 
 
@@ -430,37 +464,63 @@ docs=[
 ]
 
 
-
+"""
+song_name_dict={
+    1: "Elysion",
+    2: "my time",
+    3: "love2-4-11",
+    4: "WinterAlice",
+    5: "relations",
+    6: "Bad Apple"
+}
+"""
+song_docs=[
+'sing the song named elysion',
+'sing the song named my time',
+'sing the song named love2-4-11',
+'sing the song named winter alice',
+'sing the song named relations',
+'sing the song named bad apple'
+]
 
 if(__name__=='__main__'):
 
     # this will finally be initiated when starting the server
     # which works as a global instance, based on some lexicon methods
-    miku= MikuCore();
+    miku= MikuCore(data_path=MEMORY_DIR);
 
-
-    # for i, doc in enumerate(docs):
+    # FOR SONG NAME RECOGNITION TEST
+    # for i, doc in enumerate(song_docs):
     #     miku.process(doc);
-    # miku.respond();
-    MAX_STEP=1000000;
-    LOG_STEP=1000;
-    LEARN_STEP=10;
-    initial_statement="wave your hands";
-    good_statement="fantastic";
-    bad_statement="stupid";
-    average_loss=0.0;
-    hit_time=0;
-    for i in range(MAX_STEP):
-        action_no=miku.process(initial_statement);
-        if(int(action_no)==1):
-            miku.process(good_statement);
-            hit_time+=1;
-        else:
-            miku.process(bad_statement);
-        if(np.mod(i+1, LEARN_STEP)==0):
-            loss=miku.step();
-            average_loss+=loss*LEARN_STEP/LOG_STEP;
-        if(np.mod(i+1, LOG_STEP)==0):
-            print(average_loss);
-            print("HIT RATE: %f" % ((hit_time/i)*100));
-            average_loss=0.0;
+    #     print(miku.respond());
+
+
+    # # FOR REINFORCEMENT LEARNING TEST
+
+    # MAX_STEP=10000;
+    # LOG_STEP=1000;
+    # LEARN_STEP=10;
+    # initial_statement="wave your hands";
+    # good_statement="fantastic";
+    # bad_statement="stupid";
+    # average_loss=0.0;
+    # hit_time=0;
+    # for i in range(MAX_STEP):
+    #     action_no=miku.process(initial_statement);
+    #     if(int(action_no)==1):
+    #         miku.process(good_statement);
+    #         hit_time+=1;
+    #     else:
+    #         miku.process(bad_statement);
+    #
+    #     if(np.mod(i+1, LEARN_STEP)==0):
+    #         loss=miku.step();
+    #         average_loss+=loss*LEARN_STEP/LOG_STEP;
+    #     if(np.mod(i+1, LOG_STEP)==0):
+    #         print(average_loss);
+    #         print("HIT RATE: %f" % ((hit_time/(i+1))*100));
+    #         print(miku.respond());
+    #         average_loss=0.0;
+    #     else:
+    #         miku.respond();
+    # miku.save_state();

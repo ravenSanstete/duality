@@ -1,4 +1,4 @@
 *.pyc
 *.py
-unity_script/*.cs
 !duality/*.py
+!unity/*.cs

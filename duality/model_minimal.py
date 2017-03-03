@@ -16,6 +16,7 @@ import numpy as np
 import os
 import Levenshtein as leven
 import random
+import threading
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
@@ -306,6 +307,8 @@ class MikuCore:
         self.batch_size=50;
         self.reg_1=0.01;
         self.gamma=0.01;
+        # the time to do a step of training
+        self.learning_interval=2;
 
 
         self.dejavu=Dejavu(capacity);
@@ -316,6 +319,12 @@ class MikuCore:
         self.action_selected=torch.LongTensor([0]);
 
         self.memory_pool=MemorySeq(default_value=self.organize_response(0, 0, 0));
+
+        # start the thread to do stepping
+        self.self_improvement = threading.Timer(self.learning_interval, self.step);
+        self.self_improvement.start();
+
+
     # when a command reaches in, and thus the current state has been changed to the
 
     # CURRENT_STATE(COMMAND REACHED) -> [ACTION] -> NEXT_STATE(COMMAND UPDATED) -> REWARD

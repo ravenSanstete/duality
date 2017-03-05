@@ -17,7 +17,7 @@ if(not IS_DEBUG):
 
 
 INTERVAL = 5
-HOST, TCP_PORT, UDP_PORT = "127.0.0.1", 4000, 13000
+HOST, TCP_PORT, UDP_PORT = "10.141.246.29", 4000, 13000
 
 comment_q = queue.Queue()
 # init the client ip address pool, a mechanism to maintain the client pool should be implemented

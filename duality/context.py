@@ -1,6 +1,6 @@
 from collections import namedtuple
 DIR='/Users/morino/Downloads/sentiment_anaysis/tweet140/data';
-MEMORY_DIR='/Users/morino/Desktop/common/OneDrive/code/duality/duality/data/memory.dat';
+MEMORY_DIR='/home/morino/Desktop/server/duality/duality/data/memory.dat';
 PORT=13000;
 
 # use this dictionary to select the local name of the action

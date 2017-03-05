@@ -17,7 +17,7 @@ if(not IS_DEBUG):
 
 
 INTERVAL = 5
-HOST, TCP_PORT, UDP_PORT = "localhost", 4000, 13000
+HOST, TCP_PORT, UDP_PORT = "127.0.0.1", 4000, 13000
 
 comment_q = queue.Queue()
 # init the client ip address pool, a mechanism to maintain the client pool should be implemented
@@ -91,6 +91,8 @@ def send_datagrams():
         # encode data to json format
         json_data = json.JSONEncoder().encode(data)
         # send to all clients in client_pool
+        print("-------push data------");
+        print(json_data);
         for host in client_pool:
             udp_send(host, UDP_PORT, json_data)
     timer_send_datagrams()

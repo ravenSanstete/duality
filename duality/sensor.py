@@ -16,6 +16,7 @@ the general interface
 
 @param: pcm_data: in a binary array form
 """
+
 def recognize(pcm_data):
     token = _auth();
     return _invoke_recognition(pcm_data, token);

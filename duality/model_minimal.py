@@ -135,7 +135,7 @@ def _find_song(name):
 
 # which means never exists a song that is not in the dictionary
 def _random_song():
-    return random.choice(song_name_dict.keys());
+    return random.choice(list(song_name_dict.keys()));
 
 
 
@@ -506,30 +506,30 @@ if(__name__=='__main__'):
 
     # # FOR REINFORCEMENT LEARNING TEST
 
-    # MAX_STEP=10000;
-    # LOG_STEP=1000;
-    # LEARN_STEP=10;
-    # initial_statement="wave your hands";
-    # good_statement="fantastic";
-    # bad_statement="stupid";
-    # average_loss=0.0;
-    # hit_time=0;
-    # for i in range(MAX_STEP):
-    #     action_no=miku.process(initial_statement);
-    #     if(int(action_no)==1):
-    #         miku.process(good_statement);
-    #         hit_time+=1;
-    #     else:
-    #         miku.process(bad_statement);
-    #
-    #     if(np.mod(i+1, LEARN_STEP)==0):
-    #         loss=miku.step();
-    #         average_loss+=loss*LEARN_STEP/LOG_STEP;
-    #     if(np.mod(i+1, LOG_STEP)==0):
-    #         print(average_loss);
-    #         print("HIT RATE: %f" % ((hit_time/(i+1))*100));
-    #         print(miku.respond());
-    #         average_loss=0.0;
-    #     else:
-    #         miku.respond();
-    # miku.save_state();
+    MAX_STEP=10000;
+    LOG_STEP=1000;
+    LEARN_STEP=10;
+    initial_statement="wave your hands";
+    good_statement="fantastic";
+    bad_statement="stupid";
+    average_loss=0.0;
+    hit_time=0;
+    for i in range(MAX_STEP):
+        action_no=miku.process(initial_statement);
+        if(int(action_no)==1):
+            miku.process(good_statement);
+            hit_time+=1;
+        else:
+            miku.process(bad_statement);
+
+        if(np.mod(i+1, LEARN_STEP)==0):
+            loss=miku.step();
+            average_loss+=loss*LEARN_STEP/LOG_STEP;
+        if(np.mod(i+1, LOG_STEP)==0):
+            print(average_loss);
+            print("HIT RATE: %f" % ((hit_time/(i+1))*100));
+            print(miku.respond());
+            average_loss=0.0;
+        else:
+            miku.respond();
+    miku.save_state();
